@@ -1,0 +1,33 @@
+{
+  "version": 8,
+  "configurePresets": [
+    {
+      "name": "clang",
+      "displayName": "clang",
+      "description": "Using compilers: C = /usr/bin/clang, CXX = /usr/bin/clang++",
+      "binaryDir": "${sourceDir}/build",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/install/${presetName}",
+        "CMAKE_C_COMPILER": "/usr/bin/clang",
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+        "CMAKE_DEFAULT_BUILD_TYPE": "Debug",
+        "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_CXX_FLAGS": "-std=c++17"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "clang",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "clang",
+      "configuration": "Release"
+    }
+  ]
+}
