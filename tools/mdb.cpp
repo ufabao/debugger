@@ -8,7 +8,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -55,11 +57,38 @@ pid_t attach(int argc, const char** argv) {
   return pid;
 }
 
-std::vector<std::string> split(std::string_view str, char delimiter);
-bool                     is_prefix(std::string_view str, std::string_view of);
+std::vector<std::string> split(std::string_view str, char delimiter) {
+  std::vector<std::string> out{};
+  std::stringstream        ss{std::string{str}};
+  std::string              item;
 
-void resume(pid_t pid);
-void wait_on_signal(pid_t pid);
+  while (std::getline(ss, item, delimiter)) {
+    out.push_back(item);
+  }
+
+  return out;
+}
+bool is_prefix(std::string_view str, std::string_view of) {
+  if (str.size() > of.size()) {
+    return false;
+  }
+  return std::equal(str.begin(), str.end(), of.begin());
+}
+
+void resume(pid_t pid) {
+  if (ptrace(PTRACE_CONT, pid, nullptr, nullptr) < 0) {
+    std::cerr << "Couldn't continue\n";
+    std::exit(-1);
+  }
+}
+void wait_on_signal(pid_t pid) {
+  int wait_status = 0;
+  int options     = 0;
+  if (waitpid(pid, &wait_status, options) < 0) {
+    std::perror("waitpid failed");
+    std::exit(-1);
+  }
+}
 
 void handle_command(pid_t pid, std::string_view line) {
   auto        args    = split(line, ' ');
