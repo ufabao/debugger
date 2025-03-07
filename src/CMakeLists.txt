@@ -1,4 +1,4 @@
-add_library(libmdb libmdb.cpp)
+add_library(libmdb process.cpp pipe.cpp registers.cpp)
 add_library(mdb::libmdb ALIAS libmdb)
 
 set_target_properties(

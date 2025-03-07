@@ -28,13 +28,7 @@
       "Remove": [
         "modernize-use-trailing-return-type",
         "readability-identifier-length"
-      ],
-      "CheckOptions": {
-        "readability-identifier-naming.VariableCase": "camelBack",
-        "readability-identifier-naming.ClassCase": "CamelCase",
-        "readability-identifier-naming.FunctionCase": "camelBack",
-        "readability-identifier-naming.NamespaceCase": "lower_case"
-      }
+      ]
     }
   },
   "Index": {
