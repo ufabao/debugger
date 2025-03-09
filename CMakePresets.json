@@ -15,7 +15,7 @@
         "CMAKE_CONFIGURATION_TYPES": "Debug;Release",
         "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/../vcpkg/scripts/buildsystems/vcpkg.cmake",
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_CXX_FLAGS": "-std=c++17"
+        "CMAKE_CXX_FLAGS": "-std=c++20"
       }
     }
   ],

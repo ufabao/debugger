@@ -3,19 +3,23 @@
 #include <cstddef>
 #include <vector>
 
-namespace mdb {
-class Pipe {
+namespace sdb
+{
+class Pipe
+{
  public:
   explicit Pipe(bool close_on_exec);
   ~Pipe();
 
   [[nodiscard]]
-  int get_read() const {
+  int get_read() const
+  {
     return fds_[read_fd];
   }
 
   [[nodiscard]]
-  int get_write() const {
+  int get_write() const
+  {
     return fds_[write_fd];
   }
 
@@ -32,4 +36,4 @@ class Pipe {
   static constexpr unsigned write_fd = 1;
   int                       fds_[2];
 };
-}  // namespace mdb
+}  // namespace sdb

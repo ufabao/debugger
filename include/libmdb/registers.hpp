@@ -6,9 +6,11 @@
 #include <libmdb/types.hpp>
 #include <variant>
 
-namespace mdb {
+namespace sdb
+{
 class Process;
-class Registers {
+class Registers
+{
  public:
   Registers()                            = delete;
   Registers(const Registers&)            = delete;
@@ -32,11 +34,13 @@ class Registers {
   void  write(const register_info& info, value val);
 
   template <class T>
-  T read_by_id_as(register_id id) const {
+  T read_by_id_as(register_id id) const
+  {
     return std::get<T>(read(register_info_by_id(id)));
   }
 
-  void write_by_id(register_id id, value val) {
+  void write_by_id(register_id id, value val)
+  {
     write(register_info_by_id(id), val);
   }
 
@@ -47,4 +51,4 @@ class Registers {
   user     data_;
   Process* proc_;
 };
-}  // namespace mdb
+}  // namespace sdb

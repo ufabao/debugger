@@ -1,9 +1,9 @@
 add_library(libmdb process.cpp pipe.cpp registers.cpp)
-add_library(mdb::libmdb ALIAS libmdb)
+add_library(sdb::libmdb ALIAS libmdb)
 
 set_target_properties(
   libmdb
-  PROPERTIES OUTPUT_NAME mdb
+  PROPERTIES OUTPUT_NAME sdb
 )
 
 target_compile_features(libmdb PUBLIC cxx_std_17)
@@ -18,7 +18,7 @@ target_include_directories(libmdb
 
 include(GNUInstallDirs)
 install(TARGETS libmdb 
-  EXPORT mdb-targets
+  EXPORT sdb-targets
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -31,8 +31,8 @@ install(
 )
 
 install(
-  EXPORT mdb-targets 
-  FILE mdb-config.cmake 
-  NAMESPACE mdb::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/mdb
+  EXPORT sdb-targets 
+  FILE sdb-config.cmake 
+  NAMESPACE sdb::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/sdb
 )

@@ -1,6 +1,6 @@
 ---
 Language: Cpp
-Standard: c++17
+Standard: c++20
 BasedOnStyle: Google
 
 # Indentation
@@ -40,7 +40,7 @@ AlwaysBreakTemplateDeclarations: Yes
 BinPackArguments: false
 BinPackParameters: false
 BreakBeforeBinaryOperators: None
-BreakBeforeBraces: Attach
+BreakBeforeBraces: Allman
 BreakBeforeTernaryOperators: true
 BreakConstructorInitializers: BeforeColon
 BreakInheritanceList: BeforeColon
