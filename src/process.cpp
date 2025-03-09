@@ -1,16 +1,14 @@
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <unistd.h>
 
-#include <iostream>
 #include <libmdb/error.hpp>
 #include <libmdb/pipe.hpp>
 #include <libmdb/process.hpp>
 
 namespace
 {
-void exit_with_perror(sdb::Pipe& channel, std::string const& prefix)
+void exit_with_perror(mdb::pipe& channel, std::string const& prefix)
 {
   auto message = prefix + ": " + std::strerror(errno);
   channel.write(reinterpret_cast<std::byte*>(message.data()), message.size());
@@ -18,15 +16,15 @@ void exit_with_perror(sdb::Pipe& channel, std::string const& prefix)
 }
 }  // namespace
 
-std::unique_ptr<sdb::Process> sdb::Process::launch(std::filesystem::path path,
+std::unique_ptr<mdb::process> mdb::process::launch(std::filesystem::path path,
                                                    bool                  debug,
                                                    std::optional<int>    stdout_replacement)
 {
-  Pipe  channel(/*close_on_exec=*/true);
+  pipe  channel(/*close_on_exec=*/true);
   pid_t pid;
   if ((pid = fork()) < 0)
   {
-    Error::send_errno("fork failed");
+    error::send_errno("fork failed");
   }
 
   if (pid == 0)
@@ -35,12 +33,12 @@ std::unique_ptr<sdb::Process> sdb::Process::launch(std::filesystem::path path,
 
     if (stdout_replacement)
     {
+      close(STDOUT_FILENO);
       if (dup2(*stdout_replacement, STDOUT_FILENO) < 0)
       {
-        exit_with_perror(channel, "stdout replacement failed.");
+        exit_with_perror(channel, "stdout replacement failed");
       }
     }
-
     if (debug and ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0)
     {
       exit_with_perror(channel, "Tracing failed");
@@ -59,10 +57,10 @@ std::unique_ptr<sdb::Process> sdb::Process::launch(std::filesystem::path path,
   {
     waitpid(pid, nullptr, 0);
     auto chars = reinterpret_cast<char*>(data.data());
-    Error::send(std::string(chars, chars + data.size()));
+    error::send(std::string(chars, chars + data.size() + 1));
   }
 
-  std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/true, debug));
+  std::unique_ptr<process> proc(new process(pid, /*terminate_on_end=*/true, debug));
   if (debug)
   {
     proc->wait_on_signal();
@@ -71,25 +69,24 @@ std::unique_ptr<sdb::Process> sdb::Process::launch(std::filesystem::path path,
   return proc;
 }
 
-std::unique_ptr<sdb::Process> sdb::Process::attach(pid_t pid)
+std::unique_ptr<mdb::process> mdb::process::attach(pid_t pid)
 {
   if (pid == 0)
   {
-    Error::send("Invalid PID");
+    error::send("Invalid PID");
   }
-
   if (ptrace(PTRACE_ATTACH, pid, nullptr, nullptr) < 0)
   {
-    Error::send_errno("Could not attach");
+    error::send_errno("Could not attach");
   }
 
-  std::unique_ptr<Process> proc(new Process(pid, /*terminate_on_end=*/false, /*attached=*/true));
+  std::unique_ptr<process> proc(new process(pid, /*terminate_on_end=*/false, /*attached=*/true));
   proc->wait_on_signal();
 
   return proc;
 }
 
-sdb::Process::~Process()
+mdb::process::~process()
 {
   if (pid_ != 0)
   {
@@ -101,10 +98,10 @@ sdb::Process::~Process()
         kill(pid_, SIGSTOP);
         waitpid(pid_, &status, 0);
       }
-
       ptrace(PTRACE_DETACH, pid_, nullptr, nullptr);
       kill(pid_, SIGCONT);
     }
+
     if (terminate_on_end_)
     {
       kill(pid_, SIGKILL);
@@ -113,16 +110,16 @@ sdb::Process::~Process()
   }
 }
 
-void sdb::Process::resume()
+void mdb::process::resume()
 {
   if (ptrace(PTRACE_CONT, pid_, nullptr, nullptr) < 0)
   {
-    Error::send_errno("Could not resume");
+    error::send_errno("Could not resume");
   }
   state_ = process_state::running;
 }
 
-sdb::stop_reason::stop_reason(int wait_status)
+mdb::stop_reason::stop_reason(int wait_status)
 {
   if (WIFEXITED(wait_status))
   {
@@ -139,55 +136,16 @@ sdb::stop_reason::stop_reason(int wait_status)
     reason = process_state::stopped;
     info   = WSTOPSIG(wait_status);
   }
-  else
-  {
-    Error::send("Unknown process state");
-  }
 }
 
-void sdb::Process::read_all_registers()
-{
-  if (ptrace(PTRACE_GETREGS, pid_, nullptr, &get_registers().data_.regs) < 0)
-  {
-    Error::send_errno("Could not read GPR registers");
-  }
-
-  if (ptrace(PTRACE_GETFPREGS, pid_, nullptr, &get_registers().data_.i387) < 0)
-  {
-    Error::send_errno("Could not read FPR registers");
-  }
-
-  for (int i = 0; i < 8; ++i)
-  {
-    auto id   = static_cast<int>(register_id::dr0) + i;
-    auto info = register_info_by_id(static_cast<register_id>(id));
-
-    errno             = 0;
-    std::int64_t data = ptrace(PTRACE_PEEKUSER, pid_, info.offset, nullptr);
-    if (errno != 0)
-      Error::send_errno("Could not read debug register");
-
-    get_registers().data_.u_debugreg[i] = data;
-  }
-}
-
-void sdb::Process::write_user_area(std::size_t offset, std::uint64_t data)
-{
-  if (ptrace(PTRACE_POKEUSER, pid_, offset, data) < 0)
-  {
-    Error::send_errno("Could not write to user area");
-  }
-}
-
-sdb::stop_reason sdb::Process::wait_on_signal()
+mdb::stop_reason mdb::process::wait_on_signal()
 {
   int wait_status;
   int options = 0;
   if (waitpid(pid_, &wait_status, options) < 0)
   {
-    Error::send_errno("waitpid failed");
+    error::send_errno("waitpid failed");
   }
-
   stop_reason reason(wait_status);
   state_ = reason.reason;
 
@@ -199,18 +157,50 @@ sdb::stop_reason sdb::Process::wait_on_signal()
   return reason;
 }
 
-void sdb::Process::write_fprs(const user_fpregs_struct& fprs)
+void mdb::process::read_all_registers()
 {
-  if (ptrace(PTRACE_SETFPREGS, pid_, nullptr, &fprs) < 0)
+  if (ptrace(PTRACE_GETREGS, pid_, nullptr, &get_registers().data_.regs) < 0)
   {
-    Error::send_errno("Could not write floating point registers");
+    error::send_errno("Could not read GPR registers");
+  }
+  if (ptrace(PTRACE_GETFPREGS, pid_, nullptr, &get_registers().data_.i387) < 0)
+  {
+    error::send_errno("Could not read FPR registers");
+  }
+  for (int i = 0; i < 8; ++i)
+  {
+    auto id   = static_cast<int>(register_id::dr0) + i;
+    auto info = register_info_by_id(static_cast<register_id>(id));
+
+    errno             = 0;
+    std::int64_t data = ptrace(PTRACE_PEEKUSER, pid_, info.offset, nullptr);
+    if (errno != 0)
+      error::send_errno("Could not read debug register");
+
+    get_registers().data_.u_debugreg[i] = data;
   }
 }
 
-void sdb::Process::write_gprs(const user_regs_struct& gprs)
+void mdb::process::write_user_area(std::size_t offset, std::uint64_t data)
+{
+  if (ptrace(PTRACE_POKEUSER, pid_, offset, data) < 0)
+  {
+    error::send_errno("Could not write to user area");
+  }
+}
+
+void mdb::process::write_fprs(const user_fpregs_struct& fprs)
+{
+  if (ptrace(PTRACE_SETFPREGS, pid_, nullptr, &fprs) < 0)
+  {
+    error::send_errno("Could not write floating point registers");
+  }
+}
+
+void mdb::process::write_gprs(const user_regs_struct& gprs)
 {
   if (ptrace(PTRACE_SETREGS, pid_, nullptr, &gprs) < 0)
   {
-    Error::send_errno("Could not write general purpose registers");
+    error::send_errno("Could not write general purpose registers");
   }
 }

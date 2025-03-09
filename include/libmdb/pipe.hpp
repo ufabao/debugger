@@ -1,28 +1,25 @@
-#pragma once
+#ifndef mdb_PIPE_HPP
+#define mdb_PIPE_HPP
 
 #include <cstddef>
 #include <vector>
 
-namespace sdb
+namespace mdb
 {
-class Pipe
+class pipe
 {
  public:
-  explicit Pipe(bool close_on_exec);
-  ~Pipe();
+  explicit pipe(bool close_on_exec);
+  ~pipe();
 
-  [[nodiscard]]
   int get_read() const
   {
     return fds_[read_fd];
   }
-
-  [[nodiscard]]
   int get_write() const
   {
     return fds_[write_fd];
   }
-
   int  release_read();
   int  release_write();
   void close_read();
@@ -36,4 +33,6 @@ class Pipe
   static constexpr unsigned write_fd = 1;
   int                       fds_[2];
 };
-}  // namespace sdb
+}  // namespace mdb
+
+#endif

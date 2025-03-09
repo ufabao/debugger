@@ -2,26 +2,15 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <csignal>
-#include <filesystem>
 #include <fstream>
 #include <libmdb/bit.hpp>
 #include <libmdb/error.hpp>
 #include <libmdb/pipe.hpp>
 #include <libmdb/process.hpp>
 
-using namespace sdb;
-
-namespace fs = std::filesystem;
+using namespace mdb;
 namespace
 {
-std::string getTargetPath(const std::string& target)
-{
-#ifdef NDEBUG
-  return "../targets/Release/" + target;
-#else
-  return "../targets/Debug/" + target;
-#endif
-}
 bool process_exists(pid_t pid)
 {
   auto ret = kill(pid, 0);
@@ -39,33 +28,33 @@ char get_process_status(pid_t pid)
 }
 }  // namespace
 
-TEST_CASE("Process::launch success", "[Process]")
+TEST_CASE("process::launch success", "[process]")
 {
-  auto proc = Process::launch("yes");
+  auto proc = process::launch("yes");
   REQUIRE(process_exists(proc->pid()));
 }
 
-TEST_CASE("Process::launch no such program", "[Process]")
+TEST_CASE("process::launch no such program", "[process]")
 {
-  REQUIRE_THROWS_AS(Process::launch("you_do_not_have_to_be_good"), Error);
+  REQUIRE_THROWS_AS(process::launch("you_do_not_have_to_be_good"), error);
 }
 
-TEST_CASE("Process::attach success", "[Process]")
+TEST_CASE("process::attach success", "[process]")
 {
-  auto target = Process::launch(getTargetPath("run_endlessly"), false);
-  auto proc   = Process::attach(target->pid());
+  auto target = process::launch("targets/run_endlessly", false);
+  auto proc   = process::attach(target->pid());
   REQUIRE(get_process_status(target->pid()) == 't');
 }
 
-TEST_CASE("Process::attach no such process", "[Process]")
+TEST_CASE("process::attach invalid PID", "[process]")
 {
-  REQUIRE_THROWS_AS(Process::attach(0), Error);
+  REQUIRE_THROWS_AS(process::attach(0), error);
 }
 
-TEST_CASE("process::resume success", "[Process]")
+TEST_CASE("process::resume success", "[process]")
 {
   {
-    auto proc = Process::launch(getTargetPath("run_endlessly"));
+    auto proc = process::launch("targets/run_endlessly");
     proc->resume();
     auto status  = get_process_status(proc->pid());
     auto success = status == 'R' or status == 'S';
@@ -73,8 +62,8 @@ TEST_CASE("process::resume success", "[Process]")
   }
 
   {
-    auto target = Process::launch(getTargetPath("run_endlessly"), false);
-    auto proc   = Process::attach(target->pid());
+    auto target = process::launch("targets/run_endlessly", false);
+    auto proc   = process::attach(target->pid());
     proc->resume();
     auto status  = get_process_status(proc->pid());
     auto success = status == 'R' or status == 'S';
@@ -82,20 +71,30 @@ TEST_CASE("process::resume success", "[Process]")
   }
 }
 
-TEST_CASE("Process::resume already terminated", "[Process]")
+TEST_CASE("process::resume already terminated", "[process]")
 {
-  auto proc = Process::launch(getTargetPath("end_immediately"));
-  proc->resume();
-  proc->wait_on_signal();
-  REQUIRE_THROWS_AS(proc->resume(), Error);
+  {
+    auto proc = process::launch("targets/end_immediately");
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE_THROWS_AS(proc->resume(), error);
+  }
+
+  {
+    auto target = process::launch("targets/end_immediately", false);
+    auto proc   = process::attach(target->pid());
+    proc->resume();
+    proc->wait_on_signal();
+    REQUIRE_THROWS_AS(proc->resume(), error);
+  }
 }
 
 TEST_CASE("Write register works", "[register]")
 {
   bool      close_on_exec = false;
-  sdb::Pipe channel(close_on_exec);
+  mdb::pipe channel(close_on_exec);
 
-  auto proc = Process::launch(getTargetPath("reg_write"), true, channel.get_write());
+  auto proc = process::launch("targets/reg_write", true, channel.get_write());
   channel.close_write();
 
   proc->resume();
@@ -118,28 +117,28 @@ TEST_CASE("Write register works", "[register]")
   output = channel.read();
   REQUIRE(to_string_view(output) == "0xba5eba11");
 
-  regs.write_by_id(register_id::xmm0, 42.24);
+  regs.write_by_id(register_id::xmm0, 42.42);
 
   proc->resume();
   proc->wait_on_signal();
 
   output = channel.read();
-  REQUIRE(to_string_view(output) == "42.24");
+  REQUIRE(to_string_view(output) == "42.42");
 
-  // regs.write_by_id(register_id::st0, 42.24l);
-  // regs.write_by_id(register_id::fsw, std::uint16_t{0b0011100000000000});
-  // regs.write_by_id(register_id::ftw, std::uint16_t{0b0011111111111111});
+  regs.write_by_id(register_id::st0, 42.42l);
+  regs.write_by_id(register_id::fsw, std::uint16_t{0b0011100000000000});
+  regs.write_by_id(register_id::ftw, std::uint16_t{0b0011111111111111});
 
-  // proc->resume();
-  // proc->wait_on_signal();
+  proc->resume();
+  proc->wait_on_signal();
 
-  // output = channel.read();
-  // REQUIRE(to_string_view(output) == "42.24");
+  output = channel.read();
+  REQUIRE(to_string_view(output) == "42.42");
 }
 
-TEST_CASE("Read register works", "[Register]")
+TEST_CASE("Read register works", "[register]")
 {
-  auto  proc = Process::launch(getTargetPath("reg_read"));
+  auto  proc = process::launch("targets/reg_read");
   auto& regs = proc->get_registers();
 
   proc->resume();
@@ -157,8 +156,13 @@ TEST_CASE("Read register works", "[Register]")
 
   REQUIRE(regs.read_by_id_as<byte64>(register_id::mm0) == to_byte64(0xba5eba11ull));
 
-  // proc->resume();
-  // proc->wait_on_signal();
+  proc->resume();
+  proc->wait_on_signal();
 
-  // REQUIRE(regs.read_by_id_as<long double>(register_id::st0) == 64.125L);
+  REQUIRE(regs.read_by_id_as<byte128>(register_id::xmm0) == to_byte128(64.125));
+
+  proc->resume();
+  proc->wait_on_signal();
+
+  REQUIRE(regs.read_by_id_as<long double>(register_id::st0) == 64.125L);
 }

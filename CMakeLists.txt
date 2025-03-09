@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.19)
 
-project("sdb" LANGUAGES CXX ASM)
+project("mdb" LANGUAGES CXX ASM)
 include(${CMAKE_SOURCE_DIR}/CompilerFlags.cmake)
 set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -DNDEBUG")
 

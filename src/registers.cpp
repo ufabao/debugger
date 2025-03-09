@@ -4,23 +4,18 @@
 #include <libmdb/process.hpp>
 #include <libmdb/registers.hpp>
 #include <type_traits>
-
 namespace
 {
 template <class T>
-sdb::byte128 widen(const sdb::register_info& info, T t)
+mdb::byte128 widen(const mdb::register_info& info, T t)
 {
-  using namespace sdb;
+  using namespace mdb;
   if constexpr (std::is_floating_point_v<T>)
   {
     if (info.format == register_format::double_float)
-    {
       return to_byte128(static_cast<double>(t));
-    }
     if (info.format == register_format::long_double)
-    {
       return to_byte128(static_cast<long double>(t));
-    }
   }
   else if constexpr (std::is_signed_v<T>)
   {
@@ -34,16 +29,17 @@ sdb::byte128 widen(const sdb::register_info& info, T t)
           return to_byte128(static_cast<std::int32_t>(t));
         case 8:
           return to_byte128(static_cast<std::int64_t>(t));
-        default:
-          break;
       }
     }
   }
-  return to_byte128(t);
+
+  auto ret = to_byte128(t);
+  std::fill(as_bytes(ret) + sizeof(T), as_bytes(ret) + info.size + 1, std::byte(0));
+  return ret;
 }
 }  // namespace
 
-sdb::Registers::value sdb::Registers::read(const register_info& info) const
+mdb::registers::value mdb::registers::read(const register_info& info) const
 {
   auto bytes = as_bytes(data_);
 
@@ -59,8 +55,6 @@ sdb::Registers::value sdb::Registers::read(const register_info& info) const
         return from_bytes<std::uint32_t>(bytes + info.offset);
       case 8:
         return from_bytes<std::uint64_t>(bytes + info.offset);
-      default:
-        sdb::Error::send("Unexpected register size");
     }
   }
   else if (info.format == register_format::double_float)
@@ -81,9 +75,10 @@ sdb::Registers::value sdb::Registers::read(const register_info& info) const
   }
 }
 
-void sdb::Registers::write(const register_info& info, value val)
+void mdb::registers::write(const register_info& info, value val)
 {
   auto bytes = as_bytes(data_);
+
   std::visit(
       [&](auto& v)
       {
@@ -95,8 +90,8 @@ void sdb::Registers::write(const register_info& info, value val)
         }
         else
         {
-          std::cerr << "sdb::Register::write called with "
-                       "mismatched register and value sizes";
+          std::cerr << "mdb::register::write called with mismatched"
+                       "register and value sizes";
           std::terminate();
         }
       },

@@ -1,14 +1,13 @@
-#pragma once
+#ifndef mdb_BIT_HPP
+#define mdb_BIT_HPP
 
-#include <cstddef>
 #include <cstring>
 #include <libmdb/types.hpp>
 #include <string_view>
 #include <vector>
 
-namespace sdb
+namespace mdb
 {
-
 template <class To>
 To from_bytes(const std::byte* bytes)
 {
@@ -54,5 +53,6 @@ inline std::string_view to_string_view(const std::vector<std::byte>& data)
 {
   return to_string_view(data.data(), data.size());
 }
+}  // namespace mdb
 
-}  // namespace sdb
+#endif

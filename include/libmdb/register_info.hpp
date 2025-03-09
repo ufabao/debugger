@@ -1,4 +1,5 @@
-#pragma once
+#ifndef mdb_REGISTER_INFO_HPP
+#define mdb_REGISTER_INFO_HPP
 
 #include <sys/user.h>
 
@@ -8,7 +9,7 @@
 #include <libmdb/error.hpp>
 #include <string_view>
 
-namespace sdb
+namespace mdb
 {
 enum class register_id
 {
@@ -57,26 +58,21 @@ const register_info& register_info_by(F f)
   auto it = std::find_if(std::begin(g_register_infos), std::end(g_register_infos), f);
 
   if (it == std::end(g_register_infos))
-  {
-    sdb::Error::send("Can't find register info");
-  }
+    error::send("Can't find register info");
 
   return *it;
 }
-
 inline const register_info& register_info_by_id(register_id id)
 {
   return register_info_by([id](auto& i) { return i.id == id; });
 }
-
 inline const register_info& register_info_by_name(std::string_view name)
 {
   return register_info_by([name](auto& i) { return i.name == name; });
 }
-
 inline const register_info& register_info_by_dwarf(std::int32_t dwarf_id)
 {
   return register_info_by([dwarf_id](auto& i) { return i.dwarf_id == dwarf_id; });
 }
-
-}  // namespace sdb
+}  // namespace mdb
+#endif
