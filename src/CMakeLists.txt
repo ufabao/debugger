@@ -1,5 +1,7 @@
-add_library(libmdb process.cpp pipe.cpp registers.cpp breakpoint_site.cpp)  
+add_library(libmdb process.cpp pipe.cpp registers.cpp breakpoint_site.cpp disassembler.cpp)  
 add_library(mdb::libmdb ALIAS libmdb) 
+
+target_link_libraries(libmdb PRIVATE Zydis::Zydis)
 
 set_target_properties( 
     libmdb

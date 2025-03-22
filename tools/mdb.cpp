@@ -10,7 +10,9 @@
 #include <algorithm>
 #include <charconv>
 #include <iostream>
+#include <libmdb/disassembler.hpp>
 #include <libmdb/error.hpp>
+#include <libmdb/parse.hpp>
 #include <libmdb/process.hpp>
 #include <sstream>
 #include <string>
@@ -51,6 +53,16 @@ std::vector<std::string> split(std::string_view str, char delimiter)
   return out;
 }
 
+void print_disassembly(mdb::process& process, mdb::virt_addr address, std::size_t n_instructions)
+{
+  mdb::disassembler dis(process);
+  auto              instructions = dis.disassemble(n_instructions, address);
+  for (auto& instr : instructions)
+  {
+    fmt::print("{:#018x}: {}\n", instr.address.addr(), instr.text);
+  }
+}
+
 bool is_prefix(std::string_view str, std::string_view of)
 {
   if (str.size() > of.size())
@@ -85,6 +97,8 @@ void print_help(const std::vector<std::string>& args)
     std::cerr << R"(Available commands:
     breakpoint  - Commands for operating on breakpoints
     continue    - Resume the process
+    disassemble - Disassemble machine code to assembly
+    memory      - Commands for operating on memory
     register    - Commands for operating on registers
     step        - Step over a single instruction
 )";
@@ -107,6 +121,21 @@ void print_help(const std::vector<std::string>& args)
     disable <id>
     enable <id>
     set <address>
+    )";
+  }
+  else if (is_prefix(args[1], "memory"))
+  {
+    std::cerr << R"(Available commands: 
+    read <address>
+    read <address>> <number of bytes> 
+    write <address> <bytes>
+    )";
+  }
+  else if (is_prefix(args[1], "disassemble"))
+  {
+    std::cerr << R"(Available options:
+    -c <number of instructions>
+    -a <start address>
     )";
   }
   else
@@ -165,32 +194,13 @@ void handle_register_read(mdb::process& process, const std::vector<std::string>&
   }
 }
 
-template <class I>
-std::optional<I> to_integral(std::string_view sv, int base = 10)
+void handle_stop(mdb::process& process, mdb::stop_reason reason)
 {
-  auto begin = sv.begin();
-  if (base == 16 and sv.size() > 1 and begin[0] == '0' and begin[1] == 'x')
+  print_stop_reason(process, reason);
+  if (reason.reason == mdb::process_state::stopped)
   {
-    begin += 2;
+    print_disassembly(process, process.get_pc(), 5);
   }
-
-  I    ret;
-  auto result = std::from_chars(begin, sv.end(), ret, base);
-
-  if (result.ptr != sv.end())
-  {
-    return std::nullopt;
-  }
-  return ret;
-}
-
-template <>
-std::optional<std::byte> to_integral(std::string_view sv, int base)
-{
-  auto uint8 = to_integral<std::uint8_t>(sv, base);
-  if (uint8)
-    return static_cast<std::byte>(*uint8);
-  return std::nullopt;
 }
 
 template <std::size_t N>
@@ -205,13 +215,13 @@ auto parse_vector(std::string_view text)
     invalid();
   for (auto i = 0; i < N - 1; ++i)
   {
-    bytes[i] = to_integral<std::byte>({c, 4}, 16).value();
+    bytes[i] = mdb::to_integral<std::byte>({c, 4}, 16).value();
     c += 4;
     if (*c++ != ',')
       invalid();
   }
 
-  bytes[N - 1] = to_integral<std::byte>({c, 4}, 16).value();
+  bytes[N - 1] = mdb::to_integral<std::byte>({c, 4}, 16).value();
   c += 4;
 
   if (*c++ != ']')
@@ -235,50 +245,6 @@ std::optional<F> to_float(std::string_view sv)
   return ret;
 }
 
-mdb::registers::value parse_register_value(mdb::register_info info, std::string_view text)
-{
-  try
-  {
-    if (info.format == mdb::register_format::uint)
-    {
-      switch (info.size)
-      {
-        case 1:
-          return to_integral<std::uint8_t>(text, 16).value();
-        case 2:
-          return to_integral<std::uint16_t>(text, 16).value();
-        case 4:
-          return to_integral<std::uint32_t>(text, 16).value();
-        case 8:
-          return to_integral<std::uint64_t>(text, 16).value();
-      }
-    }
-    else if (info.format == mdb::register_format::double_float)
-    {
-      return to_float<double>(text).value();
-    }
-    else if (info.format == mdb::register_format::long_double)
-    {
-      return to_float<long double>(text).value();
-    }
-    else if (info.format == mdb::register_format::vector)
-    {
-      if (info.size == 8)
-      {
-        return parse_vector<8>(text);
-      }
-      else if (info.size == 16)
-      {
-        return parse_vector<16>(text);
-      }
-    }
-  }
-  catch (...)
-  {
-  }
-  mdb::error::send("Invalid format");
-}
-
 void handle_register_write(mdb::process& process, const std::vector<std::string>& args)
 {
   if (args.size() != 4)
@@ -289,7 +255,7 @@ void handle_register_write(mdb::process& process, const std::vector<std::string>
   try
   {
     auto info  = mdb::register_info_by_name(args[2]);
-    auto value = parse_register_value(info, args[3]);
+    auto value = mdb::parse_register_value(info, args[3]);
     process.get_registers().write(info, value);
   }
   catch (mdb::error& err)
@@ -361,7 +327,7 @@ void handle_breakpoint_command(mdb::process& process, const std::vector<std::str
 
   if (is_prefix(command, "set"))
   {
-    auto address = to_integral<std::uint64_t>(args[2], 16);
+    auto address = mdb::to_integral<std::uint64_t>(args[2], 16);
 
     if (!address)
     {
@@ -373,7 +339,7 @@ void handle_breakpoint_command(mdb::process& process, const std::vector<std::str
     return;
   }
 
-  auto id = to_integral<mdb::breakpoint_site::id_type>(args[2]);
+  auto id = mdb::to_integral<mdb::breakpoint_site::id_type>(args[2]);
   if (!id)
   {
     std::cerr << "Command expects breakpoint id";
@@ -394,6 +360,102 @@ void handle_breakpoint_command(mdb::process& process, const std::vector<std::str
   }
 }
 
+void handle_memory_read_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  auto address = mdb::to_integral<std::uint64_t>(args[2], 16);
+  if (!address)
+    mdb::error::send("Invalid address format");
+
+  auto n_bytes = 32;
+  if (args.size() == 4)
+  {
+    auto bytes_arg = mdb::to_integral<std::size_t>(args[3]);
+    if (!bytes_arg)
+      mdb::error::send("Invalid number of bytes");
+    n_bytes = *bytes_arg;
+  }
+
+  auto data = process.read_memory(mdb::virt_addr(*address), n_bytes);
+
+  for (std::size_t i = 0; i < data.size(); i += 16)
+  {
+    auto start = data.begin() + i;
+    auto end   = data.begin() + std::min(i + 16, data.size());
+    fmt::print("{:#016x}: {:02x}\n", *address + i, fmt::join(start, end, " "));
+  }
+}
+
+void handle_memory_write_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  if (args.size() != 4)
+  {
+    print_help({"help", "memory"});
+    return;
+  }
+
+  auto address = mdb::to_integral<std::uint64_t>(args[2], 16);
+  if (!address)
+    mdb::error::send("Invalid address format");
+
+  auto data = mdb::parse_vector(args[3]);
+  process.write_memory(mdb::virt_addr{*address}, {data.data(), data.size()});
+}
+
+void handle_memory_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  if (args.size() < 3)
+  {
+    print_help({"help", "memory"});
+    return;
+  }
+  if (is_prefix(args[1], "read"))
+  {
+    handle_memory_read_command(process, args);
+  }
+  else if (is_prefix(args[1], "write"))
+  {
+    handle_memory_write_command(process, args);
+  }
+  else
+  {
+    print_help({"help", "memory"});
+  }
+}
+
+void handle_disassemble_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  auto        address        = process.get_pc();
+  std::size_t n_instructions = 5;
+
+  auto it = args.begin() + 1;
+  while (it != args.end())
+  {
+    if (*it == "-a" and it + 1 != args.end())
+    {
+      ++it;
+      auto opt_addr = mdb::to_integral<std::uint64_t>(*it++, 16);
+      if (!opt_addr)
+        mdb::error::send("Invalid address format");
+
+      address = mdb::virt_addr{*opt_addr};
+    }
+    else if (*it == "-c" and it + 1 != args.end())
+    {
+      ++it;
+      auto opt_n = mdb::to_integral<std::size_t>(*it++);
+      if (!opt_n)
+        mdb::error::send("Invalid instruction count");
+      n_instructions = *opt_n;
+    }
+    else
+    {
+      print_help({"help", "disassemble"});
+      return;
+    }
+    print_disassembly(process, address, n_instructions);
+  }
+}
+
 void handle_command(std::unique_ptr<mdb::process>& process, std::string_view line)
 {
   auto args    = split(line, ' ');
@@ -403,7 +465,7 @@ void handle_command(std::unique_ptr<mdb::process>& process, std::string_view lin
   {
     process->resume();
     auto reason = process->wait_on_signal();
-    print_stop_reason(*process, reason);
+    handle_stop(*process, reason);
   }
   else if (is_prefix(command, "register"))
   {
@@ -420,7 +482,15 @@ void handle_command(std::unique_ptr<mdb::process>& process, std::string_view lin
   else if (is_prefix(command, "step"))
   {
     auto reason = process->step_instruction();
-    print_stop_reason(*process, reason);
+    handle_stop(*process, reason);
+  }
+  else if (is_prefix(command, "memory"))
+  {
+    handle_memory_command(*process, args);
+  }
+  else if (is_prefix(command, "disassemble"))
+  {
+    handle_disassemble_command(*process, args);
   }
   else
   {

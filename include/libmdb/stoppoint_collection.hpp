@@ -33,6 +33,8 @@ class stoppoint_collection
   template <class F>
   void for_each(F f) const;
 
+  std::vector<Stoppoint*> get_in_region(virt_addr low, virt_addr high) const;
+
   std::size_t size() const
   {
     return stoppoints_.size();
@@ -179,6 +181,22 @@ void stoppoint_collection<Stoppoint>::for_each(F f) const
   {
     f(*point);
   }
+}
+
+template <class Stoppoint>
+std::vector<Stoppoint*> stoppoint_collection<Stoppoint>::get_in_region(virt_addr low,
+                                                                       virt_addr high) const
+{
+  std::vector<Stoppoint*> ret;
+  for (auto& site : stoppoints_)
+  {
+    if (site->in_range(low, high))
+    {
+      ret.push_back(&*site);
+    }
+  }
+
+  return ret;
 }
 
 }  // namespace mdb

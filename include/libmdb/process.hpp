@@ -4,6 +4,7 @@
 #include <sys/types.h>
 
 #include <filesystem>
+#include <libmdb/bit.hpp>
 #include <libmdb/breakpoint_site.hpp>
 #include <libmdb/registers.hpp>
 #include <libmdb/stoppoint_collection.hpp>
@@ -47,6 +48,19 @@ class process
   process& operator=(const process&) = delete;
 
   breakpoint_site& create_breakpoint_site(virt_addr address);
+
+  [[nodiscard]] std::vector<std::byte> read_memory(virt_addr address, std::size_t amount) const;
+  [[nodiscard]] std::vector<std::byte> read_memory_without_traps(virt_addr   address,
+                                                                 std::size_t amount) const;
+
+  void write_memory(virt_addr address, span<const std::byte> data);
+
+  template <class T>
+  T read_memory_as(virt_addr address) const
+  {
+    auto data = read_memory(address, sizeof(T));
+    return from_bytes<T>(data.data());
+  }
 
   process_state state() const
   {
