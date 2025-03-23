@@ -8,6 +8,7 @@
 #include <libmdb/breakpoint_site.hpp>
 #include <libmdb/registers.hpp>
 #include <libmdb/stoppoint_collection.hpp>
+#include <libmdb/watchpoint.hpp>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -47,7 +48,21 @@ class process
   process(const process&)            = delete;
   process& operator=(const process&) = delete;
 
-  breakpoint_site& create_breakpoint_site(virt_addr address);
+  breakpoint_site& create_breakpoint_site(virt_addr address,
+                                          bool      hardware = false,
+                                          bool      internal = false);
+
+  watchpoint& create_watchpoint(virt_addr address, stoppoint_mode mode, std::size_t size);
+
+  stoppoint_collection<watchpoint>& watchpoints()
+  {
+    return watchpoints_;
+  }
+
+  const stoppoint_collection<watchpoint>& watchpoints() const
+  {
+    return watchpoints_;
+  }
 
   [[nodiscard]] std::vector<std::byte> read_memory(virt_addr address, std::size_t amount) const;
   [[nodiscard]] std::vector<std::byte> read_memory_without_traps(virt_addr   address,
@@ -100,10 +115,18 @@ class process
     return breakpoint_sites_;
   }
 
+  int set_watchpoint(watchpoint::id_type id,
+                     virt_addr           address,
+                     stoppoint_mode      mode,
+                     std::size_t         size);
+
   void set_pc(virt_addr address)
   {
     get_registers().write_by_id(register_id::rip, address.addr());
   }
+
+  int  set_hardware_breakpoint(breakpoint_site::id_type id, virt_addr address);
+  void clear_hardware_stoppoint(int index);
 
  private:
   process(pid_t pid, bool terminate_on_end, bool is_attached)
@@ -114,6 +137,8 @@ class process
   {
   }
 
+  int set_hardware_stoppoint(virt_addr address, stoppoint_mode mode, std::size_t size);
+
   void read_all_registers();
 
   pid_t                                 pid_              = 0;
@@ -122,6 +147,7 @@ class process
   bool                                  is_attached_      = true;
   std::unique_ptr<registers>            registers_;
   stoppoint_collection<breakpoint_site> breakpoint_sites_;
+  stoppoint_collection<watchpoint>      watchpoints_;
 };
 }  // namespace mdb
 
