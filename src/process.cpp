@@ -11,7 +11,6 @@
 
 namespace
 {
-
 void exit_with_perror(mdb::pipe& channel, std::string const& prefix)
 {
   auto message = prefix + ": " + std::strerror(errno);
@@ -19,51 +18,13 @@ void exit_with_perror(mdb::pipe& channel, std::string const& prefix)
   exit(-1);
 }
 
-std::uint64_t encode_hardware_stoppoint_mode(mdb::stoppoint_mode mode)
+void set_ptrace_options(pid_t pid)
 {
-  switch (mode)
+  if (ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0)
   {
-    case mdb::stoppoint_mode::write:
-      return 0b01;
-    case mdb::stoppoint_mode::read_write:
-      return 0b11;
-    case mdb::stoppoint_mode::execute:
-      return 0b00;
-    default:
-      mdb::error::send("Invalid stoppoint mode");
+    mdb::error::send_errno("Failed to set TRACESYSGOOD option");
   }
 }
-
-std::uint64_t encode_hardware_stoppoint_size(std::size_t size)
-{
-  switch (size)
-  {
-    case 1:
-      return 0b00;
-    case 2:
-      return 0b01;
-    case 4:
-      return 0b11;
-    case 8:
-      return 0b10;
-    default:
-      mdb::error::send("Invalid stoppoint size");
-  }
-}
-
-int find_free_stoppoint_register(std::uint64_t control_register)
-{
-  for (auto i = 0; i < 4; ++i)
-  {
-    if ((control_register & (0b11 << (i * 2))) == 0)
-    {
-      return i;
-    }
-  }
-
-  mdb::error::send("No remaining hardware debug registers");
-}
-
 }  // namespace
 
 std::unique_ptr<mdb::process> mdb::process::launch(std::filesystem::path path,
@@ -79,6 +40,10 @@ std::unique_ptr<mdb::process> mdb::process::launch(std::filesystem::path path,
 
   if (pid == 0)
   {
+    if (setpgid(0, 0) < 0)
+    {
+      exit_with_perror(channel, "Could not set pgid");
+    }
     personality(ADDR_NO_RANDOMIZE);
     channel.close_read();
 
@@ -94,8 +59,6 @@ std::unique_ptr<mdb::process> mdb::process::launch(std::filesystem::path path,
     {
       exit_with_perror(channel, "Tracing failed");
     }
-
-    // This execlp closes the channel if it succeeds,
     if (execlp(path.c_str(), path.c_str(), nullptr) < 0)
     {
       exit_with_perror(channel, "exec failed");
@@ -103,8 +66,6 @@ std::unique_ptr<mdb::process> mdb::process::launch(std::filesystem::path path,
   }
 
   channel.close_write();
-  // This is a blocking read, the child will either fail and write an error message here, or succeed
-  // and close this channel.
   auto data = channel.read();
   channel.close_read();
 
@@ -112,13 +73,14 @@ std::unique_ptr<mdb::process> mdb::process::launch(std::filesystem::path path,
   {
     waitpid(pid, nullptr, 0);
     auto chars = reinterpret_cast<char*>(data.data());
-    error::send(std::string(chars, chars + data.size() + 1));
+    error::send(std::string(chars, chars + data.size()));
   }
 
   std::unique_ptr<process> proc(new process(pid, /*terminate_on_end=*/true, debug));
   if (debug)
   {
     proc->wait_on_signal();
+    set_ptrace_options(proc->pid());
   }
 
   return proc;
@@ -137,6 +99,7 @@ std::unique_ptr<mdb::process> mdb::process::attach(pid_t pid)
 
   std::unique_ptr<process> proc(new process(pid, /*terminate_on_end=*/false, /*attached=*/true));
   proc->wait_on_signal();
+  set_ptrace_options(proc->pid());
 
   return proc;
 }
@@ -165,6 +128,30 @@ mdb::process::~process()
   }
 }
 
+mdb::stop_reason mdb::process::step_instruction()
+{
+  std::optional<breakpoint_site*> to_reenable;
+  auto                            pc = get_pc();
+  if (breakpoint_sites_.enabled_stoppoint_at_address(pc))
+  {
+    auto& bp = breakpoint_sites_.get_by_address(pc);
+    bp.disable();
+    to_reenable = &bp;
+  }
+
+  if (ptrace(PTRACE_SINGLESTEP, pid_, nullptr, nullptr) < 0)
+  {
+    error::send_errno("Could not single step");
+  }
+  auto reason = wait_on_signal();
+
+  if (to_reenable)
+  {
+    to_reenable.value()->enable();
+  }
+  return reason;
+}
+
 void mdb::process::resume()
 {
   auto pc = get_pc();
@@ -176,16 +163,18 @@ void mdb::process::resume()
     {
       error::send_errno("Failed to single step");
     }
-
     int wait_status;
     if (waitpid(pid_, &wait_status, 0) < 0)
     {
       error::send_errno("waitpid failed");
     }
-
     bp.enable();
   }
-  if (ptrace(PTRACE_CONT, pid_, nullptr, nullptr) < 0)
+
+  auto request = syscall_catch_policy_.get_mode() == syscall_catch_policy::mode::none
+                     ? PTRACE_CONT
+                     : PTRACE_SYSCALL;
+  if (ptrace(request, pid_, nullptr, nullptr) < 0)
   {
     error::send_errno("Could not resume");
   }
@@ -225,11 +214,29 @@ mdb::stop_reason mdb::process::wait_on_signal()
   if (is_attached_ and state_ == process_state::stopped)
   {
     read_all_registers();
+    augment_stop_reason(reason);
 
     auto instr_begin = get_pc() - static_cast<std::int64_t>(1);
-    if (reason.info == SIGTRAP and breakpoint_sites_.enabled_stoppoint_at_address(instr_begin))
+    if (reason.info == SIGTRAP)
     {
-      set_pc(instr_begin);
+      if (reason.trap_reason == trap_type::software_break and
+          breakpoint_sites_.contains_address(instr_begin) and
+          breakpoint_sites_.get_by_address(instr_begin).is_enabled())
+      {
+        set_pc(instr_begin);
+      }
+      else if (reason.trap_reason == trap_type::hardware_break)
+      {
+        auto id = get_current_hardware_stoppoint();
+        if (id.index() == 1)
+        {
+          watchpoints_.get_by_id(std::get<1>(id)).update_data();
+        }
+      }
+      else if (reason.trap_reason == trap_type::syscall)
+      {
+        reason = maybe_resume_from_syscall(reason);
+      }
     }
   }
 
@@ -292,43 +299,15 @@ mdb::breakpoint_site& mdb::process::create_breakpoint_site(virt_addr address,
   {
     error::send("Breakpoint site already created at address " + std::to_string(address.addr()));
   }
-
   return breakpoint_sites_.push(
       std::unique_ptr<breakpoint_site>(new breakpoint_site(*this, address, hardware, internal)));
-}
-
-mdb::stop_reason mdb::process::step_instruction()
-{
-  std::optional<breakpoint_site*> to_reenable;
-  auto                            pc = get_pc();
-  if (breakpoint_sites_.enabled_stoppoint_at_address(pc))
-  {
-    auto& bp = breakpoint_sites_.get_by_address(pc);
-    bp.disable();
-    to_reenable = &bp;
-  }
-
-  if (ptrace(PTRACE_SINGLESTEP, pid_, nullptr, nullptr) < 0)
-  {
-    error::send_errno("Could not single step");
-  }
-
-  auto reason = wait_on_signal();
-
-  if (to_reenable)
-  {
-    to_reenable.value()->enable();
-  }
-
-  return reason;
 }
 
 std::vector<std::byte> mdb::process::read_memory(virt_addr address, std::size_t amount) const
 {
   std::vector<std::byte> ret(amount);
 
-  iovec local_desc{.iov_base = ret.data(), .iov_len = ret.size()};
-
+  iovec              local_desc{ret.data(), ret.size()};
   std::vector<iovec> remote_descs;
   while (amount > 0)
   {
@@ -348,27 +327,7 @@ std::vector<std::byte> mdb::process::read_memory(virt_addr address, std::size_t 
   {
     error::send_errno("Could not read process memory");
   }
-
   return ret;
-}
-
-std::vector<std::byte> mdb::process::read_memory_without_traps(virt_addr   address,
-                                                               std::size_t amount) const
-{
-  auto memory = read_memory(address, amount);
-  auto sites  = breakpoint_sites_.get_in_region(address, address + static_cast<int64_t>(amount));
-
-  for (auto site : sites)
-  {
-    if (!site->is_enabled() or site->is_hardware())
-    {
-      continue;
-    }
-    auto offset           = site->address() - static_cast<int64_t>(address.addr());
-    memory[offset.addr()] = site->saved_data_;
-  }
-
-  return memory;
 }
 
 void mdb::process::write_memory(virt_addr address, span<const std::byte> data)
@@ -384,25 +343,85 @@ void mdb::process::write_memory(virt_addr address, span<const std::byte> data)
     }
     else
     {
-      auto read      = read_memory(address + static_cast<std::int64_t>(written), 8);
+      auto read      = read_memory(address + static_cast<int64_t>(written), 8);
       auto word_data = reinterpret_cast<char*>(&word);
       std::memcpy(word_data, data.begin() + written, remaining);
       std::memcpy(word_data + remaining, read.data() + remaining, 8 - remaining);
     }
-
-    if (ptrace(PTRACE_POKEDATA, pid_, address + static_cast<std::int64_t>(written), word) < 0)
+    if (ptrace(PTRACE_POKEDATA, pid_, address + static_cast<int64_t>(written), word) < 0)
     {
       error::send_errno("Failed to write memory");
     }
-
     written += 8;
   }
+}
+
+std::vector<std::byte> mdb::process::read_memory_without_traps(virt_addr   address,
+                                                               std::size_t amount) const
+{
+  auto memory = read_memory(address, amount);
+  auto sites  = breakpoint_sites_.get_in_region(address, address + amount);
+  for (auto site : sites)
+  {
+    if (!site->is_enabled() or site->is_hardware())
+      continue;
+    auto offset           = site->address() - address.addr();
+    memory[offset.addr()] = site->saved_data_;
+  }
+  return memory;
 }
 
 int mdb::process::set_hardware_breakpoint(breakpoint_site::id_type id, virt_addr address)
 {
   return set_hardware_stoppoint(address, stoppoint_mode::execute, 1);
 }
+
+namespace
+{
+std::uint64_t encode_hardware_stoppoint_mode(mdb::stoppoint_mode mode)
+{
+  switch (mode)
+  {
+    case mdb::stoppoint_mode::write:
+      return 0b01;
+    case mdb::stoppoint_mode::read_write:
+      return 0b11;
+    case mdb::stoppoint_mode::execute:
+      return 0b00;
+    default:
+      mdb::error::send("Invalid stoppoint mode");
+  }
+}
+
+std::uint64_t encode_hardware_stoppoint_size(std::size_t size)
+{
+  switch (size)
+  {
+    case 1:
+      return 0b00;
+    case 2:
+      return 0b01;
+    case 4:
+      return 0b11;
+    case 8:
+      return 0b10;
+    default:
+      mdb::error::send("Invalid stoppoint size");
+  }
+}
+
+int find_free_stoppoint_register(std::uint64_t control_register)
+{
+  for (auto i = 0; i < 4; ++i)
+  {
+    if ((control_register & (0b11 << (i * 2))) == 0)
+    {
+      return i;
+    }
+  }
+  mdb::error::send("No remaining hardware debug registers");
+}
+}  // namespace
 
 int mdb::process::set_hardware_stoppoint(virt_addr address, stoppoint_mode mode, std::size_t size)
 {
@@ -420,10 +439,12 @@ int mdb::process::set_hardware_stoppoint(virt_addr address, stoppoint_mode mode,
   auto enable_bit = (1 << (free_space * 2));
   auto mode_bits  = (mode_flag << (free_space * 4 + 16));
   auto size_bits  = (size_flag << (free_space * 4 + 18));
+
   auto clear_mask = (0b11 << (free_space * 2)) | (0b1111 << (free_space * 4 + 16));
   auto masked     = control & ~clear_mask;
 
   masked |= enable_bit | mode_bits | size_bits;
+
   regs.write_by_id(register_id::dr7, masked);
 
   return free_space;
@@ -458,6 +479,109 @@ mdb::watchpoint& mdb::process::create_watchpoint(virt_addr      address,
   {
     error::send("Watchpoint already created at address " + std::to_string(address.addr()));
   }
-
   return watchpoints_.push(std::unique_ptr<watchpoint>(new watchpoint(*this, address, mode, size)));
+}
+
+void mdb::process::augment_stop_reason(mdb::stop_reason& reason)
+{
+  siginfo_t info;
+  if (ptrace(PTRACE_GETSIGINFO, pid_, nullptr, &info) < 0)
+  {
+    error::send_errno("Failed to get signal info");
+  }
+
+  if (reason.info == (SIGTRAP | 0x80))
+  {
+    auto& sys_info = reason.syscall_info.emplace();
+    auto& regs     = get_registers();
+
+    if (expecting_syscall_exit_)
+    {
+      sys_info.entry          = false;
+      sys_info.id             = regs.read_by_id_as<std::uint64_t>(register_id::orig_rax);
+      sys_info.ret            = regs.read_by_id_as<std::uint64_t>(register_id::rax);
+      expecting_syscall_exit_ = false;
+    }
+    else
+    {
+      sys_info.entry = true;
+      sys_info.id    = regs.read_by_id_as<std::uint64_t>(register_id::orig_rax);
+
+      std::array<register_id, 6> arg_regs = {register_id::rdi,
+                                             register_id::rsi,
+                                             register_id::rdx,
+                                             register_id::r10,
+                                             register_id::r8,
+                                             register_id::r9};
+      for (auto i = 0; i < 6; ++i)
+      {
+        sys_info.args[i] = regs.read_by_id_as<std::uint64_t>(arg_regs[i]);
+      }
+
+      expecting_syscall_exit_ = true;
+    }
+
+    reason.info        = SIGTRAP;
+    reason.trap_reason = trap_type::syscall;
+    return;
+  }
+
+  expecting_syscall_exit_ = false;
+
+  reason.trap_reason = trap_type::unknown;
+  if (reason.info == SIGTRAP)
+  {
+    switch (info.si_code)
+    {
+      case TRAP_TRACE:
+        reason.trap_reason = trap_type::single_step;
+        break;
+      case SI_KERNEL:
+        reason.trap_reason = trap_type::software_break;
+        break;
+      case TRAP_HWBKPT:
+        reason.trap_reason = trap_type::hardware_break;
+        break;
+    }
+  }
+}
+
+std::variant<mdb::breakpoint_site::id_type, mdb::watchpoint::id_type>
+mdb::process::get_current_hardware_stoppoint() const
+{
+  auto& regs   = get_registers();
+  auto  status = regs.read_by_id_as<std::uint64_t>(register_id::dr6);
+  auto  index  = __builtin_ctzll(status);
+
+  auto id   = static_cast<int>(register_id::dr0) + index;
+  auto addr = virt_addr(regs.read_by_id_as<std::uint64_t>(static_cast<register_id>(id)));
+
+  using ret = std::variant<mdb::breakpoint_site::id_type, mdb::watchpoint::id_type>;
+  if (breakpoint_sites_.contains_address(addr))
+  {
+    auto site_id = breakpoint_sites_.get_by_address(addr).id();
+    return ret{std::in_place_index<0>, site_id};
+  }
+  else
+  {
+    auto watch_id = watchpoints_.get_by_address(addr).id();
+    return ret{std::in_place_index<1>, watch_id};
+  }
+}
+
+mdb::stop_reason mdb::process::maybe_resume_from_syscall(const stop_reason& reason)
+{
+  if (syscall_catch_policy_.get_mode() == syscall_catch_policy::mode::some)
+  {
+    auto& to_catch = syscall_catch_policy_.get_to_catch();
+    auto  found    = std::find(begin(to_catch), end(to_catch), reason.syscall_info->id);
+
+    if (found == end(to_catch))
+    {
+      resume();
+      return wait_on_signal();
+    }
+  }
+
+  return reason;
 }

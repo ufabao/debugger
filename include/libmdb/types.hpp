@@ -67,7 +67,15 @@ class virt_addr
   {
     return virt_addr(addr_ + offset);
   }
+  virt_addr operator+(std::size_t offset) const
+  {
+    return virt_addr(addr_ + offset);
+  }
   virt_addr operator-(std::int64_t offset) const
+  {
+    return virt_addr(addr_ - offset);
+  }
+  virt_addr operator-(std::size_t offset) const
   {
     return virt_addr(addr_ - offset);
   }

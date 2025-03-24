@@ -9,11 +9,13 @@
 
 #include <algorithm>
 #include <charconv>
+#include <csignal>
 #include <iostream>
 #include <libmdb/disassembler.hpp>
 #include <libmdb/error.hpp>
 #include <libmdb/parse.hpp>
 #include <libmdb/process.hpp>
+#include <libmdb/syscalls.hpp>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -21,6 +23,13 @@
 
 namespace
 {
+mdb::process* g_mdb_process = nullptr;
+
+void handle_sigint(int)
+{
+  kill(g_mdb_process->pid(), SIGSTOP);
+}
+
 std::unique_ptr<mdb::process> attach(int argc, const char** argv)
 {
   // Passing PID
@@ -70,6 +79,66 @@ bool is_prefix(std::string_view str, std::string_view of)
   return std::equal(str.begin(), str.end(), of.begin());
 }
 
+std::string get_sigtrap_info(const mdb::process& process, mdb::stop_reason reason)
+{
+  if (reason.trap_reason == mdb::trap_type::software_break)
+  {
+    auto& site = process.breakpoint_sites().get_by_address(process.get_pc());
+    return fmt::format(" (breakpoint {})", site.id());
+  }
+  if (reason.trap_reason == mdb::trap_type::hardware_break)
+  {
+    auto id = process.get_current_hardware_stoppoint();
+
+    if (id.index() == 0)
+    {
+      return fmt::format(" (breakpoint {})", std::get<0>(id));
+    }
+
+    std::string message;
+    auto&       point = process.watchpoints().get_by_id(std::get<1>(id));
+    message += fmt::format(" (watchpoint {})", point.id());
+
+    if (point.data() == point.previous_data())
+    {
+      message += fmt::format("\nValue: {:#x}", point.data());
+    }
+    else
+    {
+      message +=
+          fmt::format("\nOld value: {:#x}\nNew value: {:#x}", point.previous_data(), point.data());
+    }
+
+    return message;
+  }
+
+  if (reason.trap_reason == mdb::trap_type::single_step)
+  {
+    return " (single step)";
+  }
+
+  if (reason.trap_reason == mdb::trap_type::syscall)
+  {
+    const auto& info    = *reason.syscall_info;
+    std::string message = " ";
+    if (info.entry)
+    {
+      message += "(syscall entry)\n";
+      message += fmt::format(
+          "syscall: {}({:#x})", mdb::syscall_id_to_name(info.id), fmt::join(info.args, ","));
+    }
+    else
+    {
+      message += "(syscall exit)\n";
+      message += fmt::format("syscall returned: {:#x}", info.ret);
+    }
+
+    return message;
+  }
+
+  return "";
+}
+
 void print_stop_reason(const mdb::process& process, mdb::stop_reason reason)
 {
   std::string message;
@@ -84,10 +153,41 @@ void print_stop_reason(const mdb::process& process, mdb::stop_reason reason)
     case mdb::process_state::stopped:
       message = fmt::format(
           "stopped with signal {} at {:#x}", sigabbrev_np(reason.info), process.get_pc().addr());
+      if (reason.info == SIGTRAP)
+      {
+        message += get_sigtrap_info(process, reason);
+      }
       break;
   }
 
   fmt::print("Process {} {}\n", process.pid(), message);
+}
+
+void handle_syscall_catchpoint_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  mdb::syscall_catch_policy policy = mdb::syscall_catch_policy::catch_all();
+
+  if (args.size() == 3 and args[2] == "none")
+  {
+    policy = mdb::syscall_catch_policy::catch_none();
+  }
+  else if (args.size() >= 3)
+  {
+    auto             syscalls = split(args[2], ',');
+    std::vector<int> to_catch;
+    std::transform(begin(syscalls),
+                   end(syscalls),
+                   std::back_inserter(to_catch),
+                   [](auto& syscall)
+                   {
+                     return isdigit(syscall[0]) ? mdb::to_integral<int>(syscall).value()
+                                                : mdb::syscall_name_to_id(syscall);
+                   });
+
+    policy = mdb::syscall_catch_policy::catch_some(std::move(to_catch));
+  }
+
+  process.set_syscall_catch_policy(std::move(policy));
 }
 
 void print_help(const std::vector<std::string>& args)
@@ -101,6 +201,8 @@ void print_help(const std::vector<std::string>& args)
     memory      - Commands for operating on memory
     register    - Commands for operating on registers
     step        - Step over a single instruction
+    watchpoint  - Commands for operating on watchpoints
+    catchpoint  - Commands for operating on catchpoints
 )";
   }
 
@@ -121,6 +223,7 @@ void print_help(const std::vector<std::string>& args)
     disable <id>
     enable <id>
     set <address>
+    set <address> -h
     )";
   }
   else if (is_prefix(args[1], "memory"))
@@ -136,6 +239,24 @@ void print_help(const std::vector<std::string>& args)
     std::cerr << R"(Available options:
     -c <number of instructions>
     -a <start address>
+    )";
+  }
+  else if (is_prefix(args[1], "watchpoint"))
+  {
+    std::cerr << R"(Available commands:
+    list 
+    delete <id>
+    disable <id>
+    enable <id>
+    set <address> <write|rw|execute> <size>
+    )";
+  }
+  else if (is_prefix(args[1], "catchpoint"))
+  {
+    std::cerr << R"(Available commands:
+    syscall
+    syscall none
+    syscall <list of syscall IDs or names>
     )";
   }
   else
@@ -309,6 +430,10 @@ void handle_breakpoint_command(mdb::process& process, const std::vector<std::str
       process.breakpoint_sites().for_each(
           [](auto& bp)
           {
+            if (bp.is_internal())
+            {
+              return;
+            }
             fmt::print("{}: address = {:#x}, {}\n",
                        bp.id(),
                        bp.address().addr(),
@@ -335,7 +460,20 @@ void handle_breakpoint_command(mdb::process& process, const std::vector<std::str
       return;
     }
 
-    process.create_breakpoint_site(mdb::virt_addr{*address}).enable();
+    bool hardware = false;
+    if (args.size() == 4)
+    {
+      if (args[3] == "-h")
+      {
+        hardware = true;
+      }
+      else
+      {
+        mdb::error::send("Invalid breakpoint command argument");
+      }
+    }
+
+    process.create_breakpoint_site(mdb::virt_addr{*address}, hardware).enable();
     return;
   }
 
@@ -456,6 +594,135 @@ void handle_disassemble_command(mdb::process& process, const std::vector<std::st
   }
 }
 
+void handle_watchpoint_list(mdb::process& process, const std::vector<std::string>& args)
+{
+  auto stoppoint_mode_to_string = [](auto mode)
+  {
+    switch (mode)
+    {
+      case mdb::stoppoint_mode::execute:
+        return "execute";
+      case mdb::stoppoint_mode::write:
+        return "write";
+      case mdb::stoppoint_mode::read_write:
+        return "read_write";
+      default:
+        mdb::error::send("Invalid stoppoint mode");
+    }
+  };
+
+  if (process.watchpoints().empty())
+  {
+    fmt::print("No watchpoints set\n");
+  }
+  else
+  {
+    fmt::print("Current watchpoints:\n");
+    process.watchpoints().for_each(
+        [&](auto& point)
+        {
+          fmt::print("{}: address = {:#x}, mode = {}, size = {}, {}\n",
+                     point.id(),
+                     point.address().addr(),
+                     stoppoint_mode_to_string(point.mode()),
+                     point.size(),
+                     point.is_enabled() ? "enabled" : "disabled");
+        });
+  }
+}
+
+void handle_watchpoint_set(mdb::process& process, const std::vector<std::string>& args)
+{
+  if (args.size() != 5)
+  {
+    print_help({"help", "watchpoint"});
+    return;
+  }
+
+  auto address   = mdb::to_integral<std::uint64_t>(args[2], 16);
+  auto mode_text = args[3];
+  auto size      = mdb::to_integral<std::size_t>(args[4]);
+
+  if (!address or !size or !(mode_text == "write" or mode_text == "rw" or mode_text == "execute"))
+  {
+    print_help({"help", "watchpoint"});
+    return;
+  }
+
+  mdb::stoppoint_mode mode;
+  if (mode_text == "write")
+    mode = mdb::stoppoint_mode::write;
+  else if (mode_text == "rw")
+    mode = mdb::stoppoint_mode::read_write;
+  else if (mode_text == "execute")
+    mode = mdb::stoppoint_mode::execute;
+
+  process.create_watchpoint(mdb::virt_addr{*address}, mode, *size).enable();
+}
+
+void handle_watchpoint_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  if (args.size() < 2)
+  {
+    print_help({"help", "watchpoint"});
+    return;
+  }
+
+  auto command = args[1];
+
+  if (is_prefix(command, "list"))
+  {
+    handle_watchpoint_list(process, args);
+    return;
+  }
+
+  if (is_prefix(command, "set"))
+  {
+    handle_watchpoint_set(process, args);
+    return;
+  }
+
+  if (args.size() < 3)
+  {
+    print_help({"help", "watchpoint"});
+    return;
+  }
+
+  auto id = mdb::to_integral<mdb::watchpoint::id_type>(args[2]);
+  if (!id)
+  {
+    std::cerr << "Command expects watchpoint id";
+    return;
+  }
+
+  if (is_prefix(command, "enable"))
+  {
+    process.watchpoints().get_by_id(*id).enable();
+  }
+  else if (is_prefix(command, "disable"))
+  {
+    process.watchpoints().get_by_id(*id).disable();
+  }
+  else if (is_prefix(command, "delete"))
+  {
+    process.watchpoints().remove_by_id(*id);
+  }
+}
+
+void handle_catchpoint_command(mdb::process& process, const std::vector<std::string>& args)
+{
+  if (args.size() < 2)
+  {
+    print_help({"help", "catchpoint"});
+    return;
+  }
+
+  if (is_prefix(args[1], "syscall"))
+  {
+    handle_syscall_catchpoint_command(process, args);
+  }
+}
+
 void handle_command(std::unique_ptr<mdb::process>& process, std::string_view line)
 {
   auto args    = split(line, ' ');
@@ -479,6 +746,10 @@ void handle_command(std::unique_ptr<mdb::process>& process, std::string_view lin
   {
     handle_breakpoint_command(*process, args);
   }
+  else if (is_prefix(command, "watchpoint"))
+  {
+    handle_watchpoint_command(*process, args);
+  }
   else if (is_prefix(command, "step"))
   {
     auto reason = process->step_instruction();
@@ -491,6 +762,10 @@ void handle_command(std::unique_ptr<mdb::process>& process, std::string_view lin
   else if (is_prefix(command, "disassemble"))
   {
     handle_disassemble_command(*process, args);
+  }
+  else if (is_prefix(command, "catchpoint"))
+  {
+    handle_catchpoint_command(*process, args);
   }
   else
   {
@@ -545,7 +820,9 @@ int main(int argc, const char** argv)
 
   try
   {
-    auto process = attach(argc, argv);
+    auto process  = attach(argc, argv);
+    g_mdb_process = process.get();
+    signal(SIGINT, handle_sigint);
     main_loop(process);
   }
   catch (const mdb::error& err)

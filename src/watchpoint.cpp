@@ -1,6 +1,7 @@
 #include <libmdb/error.hpp>
 #include <libmdb/process.hpp>
 #include <libmdb/watchpoint.hpp>
+#include <utility>
 
 namespace mdb
 {
@@ -9,6 +10,7 @@ auto get_next_id()
   static mdb::watchpoint::id_type id = 0;
   return ++id;
 }
+}  // namespace mdb
 
 mdb::watchpoint::watchpoint(process& proc, virt_addr address, stoppoint_mode mode, std::size_t size)
     : process_{&proc}, address_{address}, mode_{mode}, size_{size}, is_enabled_{false}
@@ -19,6 +21,7 @@ mdb::watchpoint::watchpoint(process& proc, virt_addr address, stoppoint_mode mod
   }
 
   id_ = get_next_id();
+  update_data();
 }
 
 void mdb::watchpoint::enable()
@@ -43,4 +46,10 @@ void mdb::watchpoint::disable()
   is_enabled_ = false;
 }
 
-}  // namespace mdb
+void mdb::watchpoint::update_data()
+{
+  std::uint64_t new_data = 0;
+  auto          read     = process_->read_memory(address_, size_);
+  memcpy(&new_data, read.data(), size_);
+  previous_data_ = std::exchange(data_, new_data);
+}

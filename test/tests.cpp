@@ -1,4 +1,5 @@
 #include <elf.h>
+#include <fcntl.h>
 #include <sys/types.h>
 
 #include <catch2/catch_test_macros.hpp>
@@ -8,6 +9,7 @@
 #include <libmdb/error.hpp>
 #include <libmdb/pipe.hpp>
 #include <libmdb/process.hpp>
+#include <libmdb/syscalls.hpp>
 #include <regex>
 
 using namespace mdb;
@@ -475,4 +477,44 @@ TEST_CASE("Watchpoint detects read", "[watchpoint]")
   proc->wait_on_signal();
 
   REQUIRE(to_string_view(channel.read()) == "Putting pineapple on pizza...\n");
+}
+
+TEST_CASE("Syscall mapping works", "[syscall]")
+{
+  REQUIRE(mdb::syscall_id_to_name(0) == "read");
+  REQUIRE(mdb::syscall_name_to_id("read") == 0);
+  REQUIRE(mdb::syscall_id_to_name(1) == "write");
+  REQUIRE(mdb::syscall_name_to_id("write") == 1);
+  REQUIRE(mdb::syscall_id_to_name(62) == "kill");
+  REQUIRE(mdb::syscall_name_to_id("kill") == 62);
+}
+
+TEST_CASE("Syscall catchpoints work", "[catchpoint]")
+{
+  auto dev_null = open("/dev/null", O_WRONLY);
+  auto proc     = process::launch("targets/anti_debugger", true, dev_null);
+
+  auto write_syscall = mdb::syscall_name_to_id("write");
+  auto policy        = mdb::syscall_catch_policy::catch_some({write_syscall});
+  proc->set_syscall_catch_policy(policy);
+
+  proc->resume();
+  auto reason = proc->wait_on_signal();
+
+  REQUIRE(reason.reason == mdb::process_state::stopped);
+  REQUIRE(reason.info == SIGTRAP);
+  REQUIRE(reason.trap_reason == mdb::trap_type::syscall);
+  REQUIRE(reason.syscall_info->id == write_syscall);
+  REQUIRE(reason.syscall_info->entry == true);
+
+  proc->resume();
+  reason = proc->wait_on_signal();
+
+  REQUIRE(reason.reason == mdb::process_state::stopped);
+  REQUIRE(reason.info == SIGTRAP);
+  REQUIRE(reason.trap_reason == mdb::trap_type::syscall);
+  REQUIRE(reason.syscall_info->id == write_syscall);
+  REQUIRE(reason.syscall_info->entry == false);
+
+  close(dev_null);
 }
