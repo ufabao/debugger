@@ -11,6 +11,7 @@
 #include <libmdb/watchpoint.hpp>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace mdb
@@ -78,11 +79,11 @@ class syscall_catch_policy
     return {mode::some, std::move(to_catch)};
   }
 
-  mode get_mode() const
+  [[nodiscard]] mode get_mode() const
   {
     return mode_;
   }
-  const std::vector<int>& get_to_catch() const
+  [[nodiscard]] const std::vector<int>& get_to_catch() const
   {
     return to_catch_;
   }
@@ -125,7 +126,7 @@ class process
     return watchpoints_;
   }
 
-  const stoppoint_collection<watchpoint>& watchpoints() const
+  [[nodiscard]] const stoppoint_collection<watchpoint>& watchpoints() const
   {
     return watchpoints_;
   }
@@ -143,11 +144,11 @@ class process
     return from_bytes<T>(data.data());
   }
 
-  process_state state() const
+  [[nodiscard]] process_state state() const
   {
     return state_;
   }
-  pid_t pid() const
+  [[nodiscard]] pid_t pid() const
   {
     return pid_;
   }
@@ -156,7 +157,7 @@ class process
   {
     return *registers_;
   }
-  const registers& get_registers() const
+  [[nodiscard]] const registers& get_registers() const
   {
     return *registers_;
   }
@@ -166,7 +167,7 @@ class process
   void write_fprs(const user_fpregs_struct& fprs);
   void write_gprs(const user_regs_struct& fprs);
 
-  virt_addr get_pc() const
+  [[nodiscard]] virt_addr get_pc() const
   {
     return virt_addr{get_registers().read_by_id_as<std::uint64_t>(register_id::rip)};
   }
@@ -176,7 +177,7 @@ class process
     return breakpoint_sites_;
   }
 
-  const stoppoint_collection<breakpoint_site>& breakpoint_sites() const
+  [[nodiscard]] const stoppoint_collection<breakpoint_site>& breakpoint_sites() const
   {
     return breakpoint_sites_;
   }
@@ -194,13 +195,15 @@ class process
   int  set_hardware_breakpoint(breakpoint_site::id_type id, virt_addr address);
   void clear_hardware_stoppoint(int index);
 
-  std::variant<breakpoint_site::id_type, watchpoint::id_type> get_current_hardware_stoppoint()
-      const;
+  [[nodiscard]] std::variant<breakpoint_site::id_type, watchpoint::id_type>
+  get_current_hardware_stoppoint() const;
 
   void set_syscall_catch_policy(syscall_catch_policy info)
   {
     syscall_catch_policy_ = std::move(info);
   }
+
+  [[nodiscard]] std::unordered_map<int, std::uint64_t> get_auxv() const;
 
  private:
   process(pid_t pid, bool terminate_on_end, bool is_attached)

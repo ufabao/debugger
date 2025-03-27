@@ -5,7 +5,10 @@ add_library(libmdb
               breakpoint_site.cpp 
               disassembler.cpp 
               watchpoint.cpp 
-              syscalls.cpp)  
+              syscalls.cpp
+              elf.cpp
+              types.cpp
+              target.cpp)  
 
               
 add_library(mdb::libmdb ALIAS libmdb) 

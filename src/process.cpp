@@ -1,9 +1,11 @@
+#include <elf.h>
 #include <sys/personality.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 
+#include <fstream>
 #include <libmdb/bit.hpp>
 #include <libmdb/error.hpp>
 #include <libmdb/pipe.hpp>
@@ -584,4 +586,23 @@ mdb::stop_reason mdb::process::maybe_resume_from_syscall(const stop_reason& reas
   }
 
   return reason;
+}
+
+std::unordered_map<int, std::uint64_t> mdb::process::get_auxv() const
+{
+  auto          path = "/proc/" + std::to_string(pid_) + "/auxv";
+  std::ifstream auxv(path);
+
+  std::unordered_map<int, std::uint64_t> ret;
+  std::uint64_t                          id, value;
+
+  auto read = [&](auto& into) { auxv.read(reinterpret_cast<char*>(&into), sizeof(into)); };
+
+  for (read(id); id != AT_NULL; read(id))
+  {
+    read(value);
+    ret[id] = value;
+  }
+
+  return ret;
 }
