@@ -8,9 +8,10 @@ add_library(libmdb
               syscalls.cpp
               elf.cpp
               types.cpp
-              target.cpp)  
+              target.cpp
+              dwarf.cpp)
 
-              
+
 add_library(mdb::libmdb ALIAS libmdb) 
 
 target_link_libraries(libmdb PRIVATE Zydis::Zydis)
